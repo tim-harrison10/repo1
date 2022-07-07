@@ -1,4 +1,380 @@
-os: linux
-language: ruby
+language: node_js
+node_js:
+- 14
+stages:
+  - name: tag-release
+    if: tag IS present
+  - name: unit-tests
+    if: branch == main || tag IS present || (!branch ~= device-tests && !commit_message ~= /\[ios-release\]/)
+  - name: ios-test-build
+    if: branch ~= ios-test-build || commit_message ~= /\[ios\-test\-build\]/
+  - name: automated-ui-tests-build
+    if: tag IS present || branch ~= device-tests || commit_message ~= /\[device\-tests\]/
+  - name: automated-ui-tests-run
+    if: tag IS present || branch ~= device-tests || commit_message ~= /\[device\-tests\]/
+  - name: code-quality
+  - name: build-staging-qa
+    if: branch == main || commit_message ~= /\[web\-qa\-test\]/
+  - name: deployment
+    if: tag IS present || commit_message ~= /\[ios-release\]/
+cache:
+  npm: true
+  directories:
+    - vendor/bundle
+jobs:
+  fast_finish: true
+  include:
+    # Tag release
+    - stage: tag-release
+      name: Tag release
+      os: osx
+      language: objective-c
+      osx_image: xcode13.4
+      script: ./bin/tag-release-ci
+      git:
+        depth: false
+      before_install:
+        - nvm install 14 && nvm use 14
+        - rvm install ruby-2.7.3 && rvm use 2.7.3
+      before_script:
+        - git config credential.username olioslittlehelper
+        - git config credential.askPass $FASTLANE_GITHUB_READ_WRITE_REPO
+        - npm install
+        - gem install renogen
+      after_failure:
+        - ruby ./bin/slack-send.rb "Error tagging build - $TRAVIS_BUILD_WEB_URL" true
+    # Unit tests
+    - stage: unit-tests
+      name: "Running tests (Components [A-M])"
+      script: FILTER="tests/unit/App/Components/[A-Ma-m]" npm run ci
+    - stage: unit-tests
+      name: "Running tests (Components [N-Z])"
+      script: FILTER="tests/unit/App/Components/[N-Zn-z]" npm run ci
+    - stage: unit-tests
+      name: "Running tests (Redux)"
+      script: FILTER="tests/unit/App/Redux" npm run ci
+    - stage: unit-tests
+      name: "Running tests (Scenes)"
+      script: FILTER="tests/unit/App/Scenes" npm run ci
+    - stage: unit-tests
+      name: "Running tests (Redux)"
+      script: FILTER="tests/unit/App/Redux" npm run ci
+    - stage: unit-tests
+      name: "Running tests (Misc)"
+      script: FILTER="tests/unit/translations.js|tests/unit/App/Helpers|tests/unit/App/Service|tests/unit/App/Utils|tests/unit/App/main*" npm run ci
+    - stage: unit-tests
+      name: "Running integration tests"
+      script: npm run test:integration
+    - stage: code-quality
+      name: "Code checks: Lint"
+      script: npm run lint
+    - stage: code-quality
+      name: "Code checks: Flow"
+      script: npm run flow
+    # Web deployment QA
+    - stage: build-staging-qa
+      name: "Web deployment to docker (staging)"
+      services:
+      - docker
+      env:
+      - ASSET_S3_BUCKET_NAME=olio-staging-images
+      - NODE_ENV=staging
+      - VERSION=latest
+      - APPLICATION_VERSION=$TRAVIS_COMMIT
+      script:
+      - ./web/build/create-docker-image
+      - ./web/build/push-docker-image
+      after_failure:
+        - ruby ./bin/slack-send.rb "Error building staging docker environment - $TRAVIS_BUILD_WEB_URL" true
+      after_success:
+        - ruby ./bin/slack-send.rb "Staging docker image now available in ECR"
+    # Web deployment staging
+    - stage: build-staging-qa
+      name: "Web deployment to docker (qa)"
+      services:
+      - docker
+      env:
+      - ASSET_S3_BUCKET_NAME=olio-qa-images
+      - NODE_ENV=qa
+      - VERSION=latest
+      - APPLICATION_VERSION=$TRAVIS_COMMIT
+      script:
+      - ./web/build/create-docker-image
+      after_failure:
+        - ruby ./bin/slack-send.rb "Error building QA docker environment - $TRAVIS_BUILD_WEB_URL" true
+    # Automated UI test runs - build IOS
+    - stage: ios-test-build
+      name: IOS - UI - Build
+      os: osx
+      vm:
+        size: 2x-large
+      language: objective-c
+      osx_image: xcode13.4
+      script:
+        - travis_wait 120 bundle exec fastlane ios staging
+      git:
+        depth: false
+      before_install:
+        - nvm install 14 && nvm alias default 14 && nvm use 14 # see https://stackoverflow.com/questions/69719601/getting-error-digital-envelope-routines-reason-unsupported-code-err-oss
+        - npm cache verify
+        - rvm install ruby-2.7.3 && rvm use 2.7.3
+        - gem install gist
+      install:
+        - bundle install
+        - npm install
+      after_failure:
+        - ruby ./bin/slack-send.rb "iOS test build failure\n\n$TRAVIS_TEST_RESULT"
+        - echo -e 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 >> ~/.gist
+        - gist -p /Users/travis/Library/Logs/gym/"OLIO-iOS-test-build.log"
+      after_success:
+        - ruby ./bin/slack-send.rb "iOS test build success"
+    # Automated UI test runs - build
+    - stage: automated-ui-tests-build
+      name: Automated tests - Android - UI - Build
+      language: android
+      dist: trusty
+      jdk: openjdk11
+      env:
+        - ASSET_S3_BUCKET_NAME=olio-qa-images
+        - TARGET_VERSION=31
+        - ANDROID_BUILD_TOOLS_VERSION=31.0.0
+        - ANDROID_HOME=~/android-sdk
+      android:
+        components:
+          - extra-android-m2repository
+      before_install:
+        - touch $HOME/.android/repositories.cfg
+        - wget "https://dl.google.com/android/repository/commandlinetools-linux-7302050_latest.zip" -O commandlinetools.zip
+        - unzip commandlinetools.zip -d $ANDROID_HOME/
+        - yes | $ANDROID_HOME/cmdline-tools/bin/sdkmanager "platforms;android-${TARGET_VERSION}" --sdk_root=$ANDROID_HOME
+        - yes | $ANDROID_HOME/cmdline-tools/bin/sdkmanager "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" --sdk_root=$ANDROID_HOME
+        - cd $ANDROID_HOME/build-tools/31.0.0 && mv d8 dx && cd lib && mv d8.jar dx.jar
+        - cd /home/travis/build/OLIOEX/native
+        - nvm install 14 && nvm use 14
+        - rvm install ruby-2.7.3 && rvm use 2.7.3
+        - sudo sysctl fs.inotify.max_user_watches=524288
+        - sudo sysctl -p
+        - npm install jetifier
+        - sed -i 's/android:extractNativeLibs="false"/android:extractNativeLibs="true"/' android/app/src/main/AndroidManifest.xml
+        - npm run android-prepare
+        - nvm install 14 && nvm use 14
+        - pyenv install 3.6.2 && pyenv global 3.6.2 && pip install -U pip && pip install awscli
+        - mkdir -p /home/travis/$TRAVIS_BUILD_NUMBER
+      install:
+        - bundle install
+        - npm install
+        - bundle exec fastlane android qa_build mode:daily
+      # Run fastlane
+      script:
+        - echo $BROWSERSTACK_APP_ID > /home/travis/$TRAVIS_BUILD_NUMBER/appid.txt
+        - aws s3 sync /home/travis/$TRAVIS_BUILD_NUMBER s3://$ASSET_S3_BUCKET_NAME/builds/$TRAVIS_BUILD_NUMBER
+      after_failure:
+        - ruby ./bin/slack-send.rb "Automated UI build stage failed, but this does not cause the build to fail. Please see $TRAVIS_BUILD_WEB_URL" true
+      after_success:
+        - ruby ./bin/slack-send.rb "Automated UI build stage completed successfully"
+      addons:
+        browserstack:
+          username:
+            secure: "jvPgD9/62ThcECN/3/tTCeO7LtiPoq1eKYq8+33g/FCPO2TrcsRAaQBzxnM63YUmCm1f6Ftcd6Ydl9MmwY8hfuTorWGqKpsWOaDh9wnZYfBc1gd1g8FrWXGfUbKjCCoitbFAQHp8D6oj+T2JxRR7xdCfHk4n/TG34xce1sIkD7NBtM4G7PibfLzOeJuvAv2J4+EaeuFbVULDnY30CJpwdYMyceUy2OpxQJERwL5bzoSnewGhRmYGwdY10KMy03gvpFp40LiMO9orXJRVusI4NdL4tnabT3b/EU+r1yeWEU9s3G29CRVnqZx9Hp0SPOANCihwlvvJqZ3UuTTxgyLgTUJLIPMzIHgeKQBOwv+SMcWvnOj2Z3C29c2A27pmrNPimP4foZ39vE6CyBGfqn0gEHFT9F8rlvLjE4hDPyAyAlp9NpB9ucTwcc0sr7IUM6SGgsKcSMtEY6F3jshj+0vpVq3aZl70DNPTQRQBly3BH8rNj8mEP6Nspp1ZWYMphH0kbFpabJ9XAP7HwnK7En9aTPeSPT6TzOSPyP+BsxmMZRUSbD8S7POsMgU8YR+ji6Qg7yPrNw0zUZ60LMuCzbcX5hfDUwCxU0Da93lhclr5E/EzXou5CyYwOiemNoalqvuKIDW0HBCiX6w/0/g9XKlFXlkEp/+NExV3U80befMwtrM="
+          access_key:
+            secure: "J3uK1undYJdA//oz5Q15neCJvF/8fjM26b6WYWVoREZIWzI5CoM7PLksoBKzCRL3TlhlbrtF3MulqBQOmhuqpgSPSgGJtg3kCgYwjXN0TvLrG3OtLh3SP2op5QsTEg6UsT+At6MtxoykbT5hPX+wclsKY4wwsEwMMk0NdQ2MlomJyrasVI0nDGpwjbbG2g6/xN60VexsWdXBtYDk2db3thICXQqe+mluJw5prvTO14yQBLNcoqjR95PCIqyLN+s/lrk35cw0J9bhbLQshjD/5w7gdMmlT9y+4Kc8mddM7VsbZxWsG2lftqcGdhdW3SOLU7mMCNJJFJmwCHT7xC/6TwB+zWHpDiyLTNzN0WhInx+tifZfYHvf/Kj3WwCUCxiwVnIej/WENQXA+zfONjdEbs/grT/biAOXN5eo6lf97N3F45ygkUyl/9YfxJ3NR+z5euwW5TxL90Xf6LZTsBUIgRwsj4yl9gdUPYtNrxrGhWrQ8W4xBtrGXOFiYOgUYl2xCNNQssrQ/JO/PvyHCIe1hSXsHVJ5bDzh7kl0r14Fqsex0QAJx2OmjIXECWSZ94TiRyKRctDp2NHTtDq4x+i3isb21sypZbylwnn7s9vk51JFB6ZzJsvAhPWc3ScP1rA2rhNPggOdnDmarX2L42RQOjE+RBRRcwACKybgNqjGOos="
+          app_path: 'android/app/build/outputs/apk/qa/release/app-qa-release.apk'
+    # Automated UI test runs - run
+    - stage: automated-ui-tests-run
+      name: Automated tests - Android - UI - Run
+      language: node_js
+      env:
+        - ASSET_S3_BUCKET_NAME=olio-qa-images
+      before_install:
+        - nvm install 14 && nvm use 14
+        - pyenv install 3.6.2 && pyenv global 3.6.2 && pip install -U pip && pip install awscli
+        - mkdir -p /home/travis/$TRAVIS_BUILD_NUMBER
+        - aws s3 sync s3://$ASSET_S3_BUCKET_NAME/builds/$TRAVIS_BUILD_NUMBER /home/travis/$TRAVIS_BUILD_NUMBER
+        - export BROWSERSTACK_APP_ID=$(cat /home/travis/$TRAVIS_BUILD_NUMBER/appid.txt)
+      install:
+        - npm install
+      # Run fastlane
+      script:
+        - npm run automated-ui-tests-ci
+      after_failure:
+        - ruby ./bin/slack-send.rb "Automated UI test run failed, but this does not cause the build to fail. Please see $TRAVIS_BUILD_WEB_URL" true
+      after_success:
+        - ruby ./bin/slack-send.rb "Automated UI test run completed successfully"
+      addons:
+        browserstack:
+          username:
+            secure: "jvPgD9/62ThcECN/3/tTCeO7LtiPoq1eKYq8+33g/FCPO2TrcsRAaQBzxnM63YUmCm1f6Ftcd6Ydl9MmwY8hfuTorWGqKpsWOaDh9wnZYfBc1gd1g8FrWXGfUbKjCCoitbFAQHp8D6oj+T2JxRR7xdCfHk4n/TG34xce1sIkD7NBtM4G7PibfLzOeJuvAv2J4+EaeuFbVULDnY30CJpwdYMyceUy2OpxQJERwL5bzoSnewGhRmYGwdY10KMy03gvpFp40LiMO9orXJRVusI4NdL4tnabT3b/EU+r1yeWEU9s3G29CRVnqZx9Hp0SPOANCihwlvvJqZ3UuTTxgyLgTUJLIPMzIHgeKQBOwv+SMcWvnOj2Z3C29c2A27pmrNPimP4foZ39vE6CyBGfqn0gEHFT9F8rlvLjE4hDPyAyAlp9NpB9ucTwcc0sr7IUM6SGgsKcSMtEY6F3jshj+0vpVq3aZl70DNPTQRQBly3BH8rNj8mEP6Nspp1ZWYMphH0kbFpabJ9XAP7HwnK7En9aTPeSPT6TzOSPyP+BsxmMZRUSbD8S7POsMgU8YR+ji6Qg7yPrNw0zUZ60LMuCzbcX5hfDUwCxU0Da93lhclr5E/EzXou5CyYwOiemNoalqvuKIDW0HBCiX6w/0/g9XKlFXlkEp/+NExV3U80befMwtrM="
+          access_key:
+            secure: "J3uK1undYJdA//oz5Q15neCJvF/8fjM26b6WYWVoREZIWzI5CoM7PLksoBKzCRL3TlhlbrtF3MulqBQOmhuqpgSPSgGJtg3kCgYwjXN0TvLrG3OtLh3SP2op5QsTEg6UsT+At6MtxoykbT5hPX+wclsKY4wwsEwMMk0NdQ2MlomJyrasVI0nDGpwjbbG2g6/xN60VexsWdXBtYDk2db3thICXQqe+mluJw5prvTO14yQBLNcoqjR95PCIqyLN+s/lrk35cw0J9bhbLQshjD/5w7gdMmlT9y+4Kc8mddM7VsbZxWsG2lftqcGdhdW3SOLU7mMCNJJFJmwCHT7xC/6TwB+zWHpDiyLTNzN0WhInx+tifZfYHvf/Kj3WwCUCxiwVnIej/WENQXA+zfONjdEbs/grT/biAOXN5eo6lf97N3F45ygkUyl/9YfxJ3NR+z5euwW5TxL90Xf6LZTsBUIgRwsj4yl9gdUPYtNrxrGhWrQ8W4xBtrGXOFiYOgUYl2xCNNQssrQ/JO/PvyHCIe1hSXsHVJ5bDzh7kl0r14Fqsex0QAJx2OmjIXECWSZ94TiRyKRctDp2NHTtDq4x+i3isb21sypZbylwnn7s9vk51JFB6ZzJsvAhPWc3ScP1rA2rhNPggOdnDmarX2L42RQOjE+RBRRcwACKybgNqjGOos="
+    # Web deployment production
+    - stage: deployment
+      name: Web deployment docker (production)
+      env:
+      - ASSET_S3_BUCKET_NAME=olio-images
+      - VERSION=$TRAVIS_TAG
+      - APPLICATION_VERSION=$TRAVIS_TAG
+      - NODE_ENV=production
+      script:
+      - ./web/build/create-docker-image
+      - ./web/build/push-docker-image
+      after_failure:
+        - ruby ./bin/slack-send.rb "Error building production docker environment - $TRAVIS_BUILD_WEB_URL" true
+      after_success:
+        - ruby ./bin/slack-send.rb "Producction docker image now available in ECR"
+    # Android deployment staging
+    - stage: deployment
+      name: "Android deployment (staging/qa)"
+      language: android
+      dist: trusty
+      jdk: openjdk11
+      android:
+        components:
+          - extra-android-m2repository
+      env:
+        - TARGET_VERSION=31
+        - ANDROID_BUILD_TOOLS_VERSION=31.0.0
+        - ANDROID_HOME=~/android-sdk
+      before_install:
+        - touch $HOME/.android/repositories.cfg
+        - wget "https://dl.google.com/android/repository/commandlinetools-linux-7302050_latest.zip" -O commandlinetools.zip
+        - unzip commandlinetools.zip -d $ANDROID_HOME/
+        - yes | $ANDROID_HOME/cmdline-tools/bin/sdkmanager "platforms;android-${TARGET_VERSION}" --sdk_root=$ANDROID_HOME
+        - yes | $ANDROID_HOME/cmdline-tools/bin/sdkmanager "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" --sdk_root=$ANDROID_HOME
+        - cd $ANDROID_HOME/build-tools/31.0.0 && mv d8 dx && cd lib && mv d8.jar dx.jar
+        - cd /home/travis/build/OLIOEX/native
+        - nvm install 14 && nvm use 14
+        - rvm install ruby-2.7.3 && rvm use 2.7.3
+        # Increase system limit for number of file watchers
+        - sudo sysctl fs.inotify.max_user_watches=524288
+        - sudo sysctl -p
+        - npm install jetifier
+        - npm run android-prepare
 
+      install:
+        - bundle install
+        - npm install
 
+      # Run fastlane
+      script:
+        - bundle exec fastlane android travis_ci env:staging
+        - bundle exec fastlane android travis_ci env:qa
+      after_failure:
+        - ruby ./bin/slack-send.rb "Android staging/qa app deployment failed - $TRAVIS_BUILD_WEB_URL" true
+      after_success:
+        - ruby ./bin/slack-send.rb "Android staging/qa app now available for testing"
+    # Android deployment production
+    - stage: deployment
+      name: "Android deployment (production)"
+      language: android
+      dist: trusty
+      jdk: openjdk11
+      android:
+        components:
+          - extra-android-m2repository
+      env:
+        - TARGET_VERSION=31
+        - ANDROID_BUILD_TOOLS_VERSION=31.0.0
+        - ANDROID_HOME=~/android-sdk
+      before_install:
+        - touch $HOME/.android/repositories.cfg
+        - wget "https://dl.google.com/android/repository/commandlinetools-linux-7302050_latest.zip" -O commandlinetools.zip
+        - unzip commandlinetools.zip -d $ANDROID_HOME/
+        - yes | $ANDROID_HOME/cmdline-tools/bin/sdkmanager "platforms;android-${TARGET_VERSION}" --sdk_root=$ANDROID_HOME
+        - yes | $ANDROID_HOME/cmdline-tools/bin/sdkmanager "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" --sdk_root=$ANDROID_HOME
+        - cd $ANDROID_HOME/build-tools/31.0.0 && mv d8 dx && cd lib && mv d8.jar dx.jar
+        - cd /home/travis/build/OLIOEX/native
+        - nvm install 14 && nvm use 14
+        - rvm install ruby-2.7.3 && rvm use 2.7.3
+        # Increase system limit for number of file watchers
+        - sudo sysctl fs.inotify.max_user_watches=524288
+        - sudo sysctl -p
+        - echo $GOOGLE_PLAY_SERVICE_ACCOUNT_KEY > /tmp/play-service-account-key.json
+        - npm install jetifier
+        - npm run android-prepare
+      install:
+        - bundle install
+        - npm install
+      script:
+        - bundle exec fastlane android travis_ci env:production
+      after_failure:
+        - ruby ./bin/slack-send.rb "Android production app deployment failed - $TRAVIS_BUILD_WEB_URL" true
+      after_success:
+        - ruby ./bin/slack-send.rb "Android production app now available for testing"
+    - stage: deployment
+      name: Deploy iOS Staging
+      os: osx
+      vm:
+        size: 2x-large
+      language: objective-c
+      osx_image: xcode13.4
+      script: travis_wait 120 npm run firebase-ios-staging
+      git:
+        depth: false
+      before_install:
+        - nvm install 14 && nvm alias default 14 && nvm use 14
+        - rvm install ruby-2.7.3 && rvm use 2.7.3
+        - gem install gist
+      install:
+        - bundle install
+        - npm install
+      after_failure:
+        - ruby ./bin/slack-send.rb "Error building iOS (staging)"
+        - echo -e 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 >> ~/.gist
+        - gist -p /Users/travis/Library/Logs/gym/"OLIO-iOS-staging.log"
+      after_success:
+        - ruby ./bin/slack-send.rb "iOS staging app now available for testing"
+    # iOS Production (Firebase build)
+    - stage: deployment
+      name: Deploy iOS Production to Firebase
+      os: osx
+      vm:
+        size: 2x-large
+      language: objective-c
+      osx_image: xcode13.4
+      script:
+        - travis_wait 120 bundle exec fastlane ios adhoc_build
+      git:
+        depth: false
+      before_install:
+        - nvm install 14 && nvm alias default 14 && nvm use 14
+        - npm cache verify
+        - rvm install ruby-2.7.3 && rvm use 2.7.3
+        - gem install gist
+      install:
+        - bundle install
+        - npm install
+      after_failure:
+        - ruby ./bin/slack-send.rb "Error building iOS (production - firebase)"
+        - echo -e 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 >> ~/.gist
+        - gist -p /Users/travis/Library/Logs/gym/"OLIO-iOS-prod-build.log"
+      after_success:
+        - ruby ./bin/slack-send.rb "iOS production app now available on Firebase"
+    # iOS Production (App Store build)
+    - stage: deployment
+      if: commit_message ~= /\[ios-release\]/
+      name: Deploy iOS Production to App Store
+      os: osx
+      vm:
+        size: 2x-large
+      language: objective-c
+      osx_image: xcode13.4
+      script:
+        - travis_wait 120 bundle exec fastlane ios app_store_build
+      git:
+        depth: false
+      before_install:
+        - nvm install 14 && nvm alias default 14 && nvm use 14 # see https://stackoverflow.com/questions/69719601/getting-error-digital-envelope-routines-reason-unsupported-code-err-oss
+        - npm cache verify
+        - rvm install ruby-2.7.3 && rvm use 2.7.3
+        - gem install gist
+      install:
+        - bundle install
+        - npm install
+      after_failure:
+        - ruby ./bin/slack-send.rb "Error building iOS (production - app store)"
+        - echo -e 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 >> ~/.gist
+        - gist -p /Users/travis/Library/Logs/gym/"OLIO-iOS-prod-release-build.log"
+      after_success:
+        - ruby ./bin/slack-send.rb "iOS production app now available on App Store"
+  allow_failures:
+    - stage: automated-ui-tests-run
