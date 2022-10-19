@@ -1,2 +1,8 @@
-os: linux
-language: ruby
+language: python
+python:
+- "3.8"
+script:
+- python -c "import os;print(os.getenv('NEW'));print(os.environ)"
+env:
+global:
+- secure: ngzY/ClfulaUI7Qf/eZvWQqdAnUYvzJHIoaPcY4UwMxcI1MGbQVxAkKgPs3H2l6OTb7Z7iol/+1X7aQYfIJqD8FOZg0lWvTVZUsOo6ZRsXdojHJkcYriCH7s6JaCniNsyXO0F4VwCwGDxhTuP07jPCHLJJVa3Bo6DrJopbI3IZGhRZLlMkaexmHd8au6KoYB7WvIvwNk5Q6NIDsCX3ha0dizPn0iBd03VZLBITovZoMEJF61y5bMK8O8ojC4tjCuE0sRFK2peEYtqOjBMjNcDkNnOZsk5VYSQkmD45KnZjiSRmAw9z9DtJTucr3b93o73JeiLoJTIL/gzbw7za+a7pJemJtHRbO55WVbG6B/9dkqrszzjSH27UIj6fn/4wQhJr/gr3NMI5HDh8yuPFLexEJaqUJOoRB/fmFwfShlEU8AsDf0nKo44+8A9VaI7smT/9gXHsym3lsgVap4gteO3T0CcKdscYy4KafkLD2JBlaTxZYGrUJMC9fTKBbb7WXQOW1DZBJlsUOX0gWdlILG3CueHZ4yTCwrEVApXWk2iOrh1CgQ3Mp/FgZQ3adjnm6gb5OO31SDZWDjGYGXe4OyfHz0a+UsDvG5sS6S1WwKxvdBCNxsV5KSnbbH2xl1LJr7HLZ8zxruWYIEda+erfreV5iytCj2OP+voXClnDOhnig=
